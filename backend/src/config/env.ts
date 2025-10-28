@@ -1,6 +1,10 @@
 import dotenv from 'dotenv';
+import path from 'path';
 
-dotenv.config();
+// Load backend/.env explicitly (works from dist/config as well)
+dotenv.config({ path: path.resolve(__dirname, '..', '..', '.env') });
+// Fallback: also load project root .env if present
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
 export const config = {
   // Server Configuration

@@ -15,6 +15,7 @@ const whatsapp_routes_js_1 = __importDefault(require("./routes/whatsapp.routes.j
 const error_middleware_js_1 = require("./middleware/error.middleware.js");
 (0, env_js_1.validateConfig)();
 const app = (0, express_1.default)();
+app.set('trust proxy', true);
 app.use((0, helmet_1.default)());
 app.use((0, compression_1.default)());
 app.use((0, cors_1.default)({
@@ -24,7 +25,8 @@ app.use((0, cors_1.default)({
 const limiter = (0, express_rate_limit_1.default)({
     windowMs: 15 * 60 * 1000,
     max: env_js_1.config.apiRateLimit,
-    message: 'Too many requests from this IP, please try again later.'
+    message: 'Too many requests from this IP, please try again later.',
+    skipSuccessfulRequests: true
 });
 app.use(limiter);
 app.use(express_1.default.json({ limit: '10mb' }));

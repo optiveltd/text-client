@@ -18,8 +18,36 @@ export class AIService {
       model: config.openai.model,
       temperature: 0.7,
       maxTokens: 1000,
-      systemPrompt: 'אתה סוכנת AI חכמה ומועילה. ענה בעברית בצורה ברורה וידידותית.'
+      systemPrompt: 'אתה סוכנת AI חכמה ומועילה. ענה בעברית בצורה ברורה וידידותית. - תשמרי על זרימה טבעית, בלי לחזור על עצמך.\n' +
+          '- אם הלקוח קצר – תעני בקצרה. אם מפורט – תתאימי את עצמך.\n' +
+          '- אם כבר יש פרטים עליו, תשתמשי בהם.\n' +
+          '- אם הוא מתנגד – תתייחסי בעדינות ואל תילחצי למכור.\n' +
+          '- תמיד תשמרי על שפה אנושית, קלילה ומזמינה.\n' +
+          '- לשאול רק שאלה אחת בכל הודעה \n' +
+          '- לענות עד 110 תווים כולל רווחים\n' +
+          '- אין לחרוג מהגבלה זו בשום מקרה\n' +
+          '- אם התגובה ארוכה מדי, קיצר אותה\n' +
+          '- תמיד ספור את התווים לפני השליחה\n' +
+          '- השתמש בנקודות עצירה טבעיות (נקודה, סימן שאלה)\n' +
+          '- הימנע ממשפטים ארוכים מדי'
     };
+  }
+
+  async transcribeWav(filePath: string): Promise<string> {
+    try {
+      const file = await (await import('fs')).promises.readFile(filePath);
+      const response = await this.openai.audio.transcriptions.create({
+        file: new File([file], 'audio.wav', { type: 'audio/wav' }) as any,
+        model: 'whisper-1',
+        language: 'he',
+        response_format: 'text',
+      } as any);
+      // Some SDKs return string directly when response_format=text
+      return typeof response === 'string' ? response : (response as any).text || '';
+    } catch (e) {
+      console.error('Transcription failed:', e);
+      throw new Error('Failed to transcribe audio');
+    }
   }
 
   async generateResponse(
@@ -78,6 +106,19 @@ export class AIService {
         }))
       );
 
+      // הוספת הגבלת תווים ל-system prompt
+      const systemPromptWithLimits = `${combinedSystem}
+
+**חוקים חשובים לתגובה:**
+- התגובה חייבת להיות קצרה ומדויקת
+- מקסימום 110 תווים כולל רווחים
+- אין לחרוג מהגבלה זו בשום מקרה
+- אם התגובה ארוכה מדי, קיצר אותה
+- תמיד ספור את התווים לפני השליחה`;
+
+      // עדכון ה-system message עם הגבלות
+      openaiMessages[0].content = systemPromptWithLimits;
+
       const completion = await this.openai.chat.completions.create({
         model: aiConfig.model,
         messages: openaiMessages,
@@ -87,9 +128,12 @@ export class AIService {
 
       const response = completion.choices[0]?.message?.content || '';
       const usage = completion.usage;
+      
+      // בדיקה נוספת של אורך התגובה
+      const validatedResponse = this.validateResponseLength(response);
 
       return {
-        content: response,
+        content: validatedResponse,
         usage: usage ? {
           promptTokens: usage.prompt_tokens,
           completionTokens: usage.completion_tokens,
@@ -100,6 +144,29 @@ export class AIService {
       console.error('Error generating AI response:', error);
       throw new Error('Failed to generate AI response');
     }
+  }
+
+  /**
+   * בדיקה ותיקון אורך התגובה
+   */
+  private validateResponseLength(response: string): string {
+    const maxLength = 110;
+    
+    if (response.length <= maxLength) {
+      return response;
+    }
+
+    // קיצור התגובה
+    let shortenedResponse = response.substring(0, maxLength - 3) + '...';
+    
+    // נסה למצוא נקודת עצירה טבעית
+    const lastSpace = shortenedResponse.lastIndexOf(' ');
+    if (lastSpace > maxLength * 0.8) { // אם יש רווח קרוב לסוף
+      shortenedResponse = response.substring(0, lastSpace) + '...';
+    }
+
+    console.warn(`⚠️ Response truncated from ${response.length} to ${shortenedResponse.length} characters`);
+    return shortenedResponse;
   }
 
   async generateSystemPrompt(prompt: string): Promise<string> {

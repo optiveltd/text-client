@@ -124,6 +124,14 @@ class ApiService {
     return response.data;
   }
 
+  // Stop simulation for user - Backend API call (WhatsApp)
+  async stopSimulation(userPhone: string) {
+    const origin = (API_BASE_URL || '').replace('/api/chat', '');
+    const url = `${origin}/api/whatsapp/stop-simulation`;
+    const response = await axios.post(url, { userPhone }, { headers: { 'Content-Type': 'application/json' }, timeout: 15000 });
+    return response.data;
+  }
+
   // Update user business name
   // frontend/src/lib/api.ts
   async updateUserBusinessName(userPhone: string, businessName: string) {

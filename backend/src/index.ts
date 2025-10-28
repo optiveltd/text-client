@@ -14,6 +14,9 @@ validateConfig();
 
 const app = express();
 
+// Trust proxy for rate limiting
+app.set('trust proxy', true);
+
 // Security middleware
 app.use(helmet());
 app.use(compression());
@@ -28,7 +31,8 @@ app.use(cors({
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: config.apiRateLimit,
-  message: 'Too many requests from this IP, please try again later.'
+  message: 'Too many requests from this IP, please try again later.',
+  skipSuccessfulRequests: true
 });
 app.use(limiter);
 

@@ -4,7 +4,9 @@ export declare class AIService {
     private defaultConfig;
     private supabaseService;
     constructor();
+    transcribeWav(filePath: string): Promise<string>;
     generateResponse(messages: Message[], customConfig?: Partial<AIConfig>): Promise<AIResponse>;
+    private validateResponseLength;
     generateSystemPrompt(prompt: string): Promise<string>;
 }
 //# sourceMappingURL=ai.service.d.ts.map

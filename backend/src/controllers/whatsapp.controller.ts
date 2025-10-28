@@ -2,10 +2,148 @@ import { Request, Response } from 'express';
 import { wasenderService } from '../services/wasender.service.js';
 import { SupabaseService } from '../services/supabase.service.js';
 import { AIService } from '../services/ai.service.js';
+import { mediaService } from '../services/media.service.js';
 
 export class WhatsAppController {
   private supabase = new SupabaseService();
   private aiService = new AIService();
+  
+  // Debouncing mechanism for message collection
+  private messageBuffers = new Map<string, {
+    messages: Array<{
+      text: string;
+      userName?: string;
+      timestamp?: number;
+      audioUrl?: string;
+      imageUrl?: string;
+      audioMediaKey?: string;
+      imageMediaKey?: string;
+    }>;
+    timer?: NodeJS.Timeout;
+    isProcessing?: boolean;
+    lastMessageTime?: number;
+  }>();
+  
+  private readonly DEBOUNCE_DELAY = 5000; // 5 seconds
+
+  private async processMessageWithDebounce(
+    senderPhone: string, 
+    text: string, 
+    userName?: string,
+    timestamp?: number,
+    audioUrl?: string,
+    imageUrl?: string,
+    audioMediaKey?: string,
+    imageMediaKey?: string
+  ): Promise<void> {
+    // Get or create buffer for this sender
+    let buffer = this.messageBuffers.get(senderPhone);
+    if (!buffer) {
+      buffer = { 
+        messages: [],
+        isProcessing: false,
+        lastMessageTime: Date.now()
+      };
+      this.messageBuffers.set(senderPhone, buffer);
+    }
+
+    // Add message to buffer
+    buffer.messages.push({
+      text,
+      userName,
+      timestamp,
+      audioUrl,
+      imageUrl,
+      audioMediaKey,
+      imageMediaKey,
+    });
+
+    buffer.lastMessageTime = Date.now();
+    console.log(`📦 Message buffered for ${senderPhone} (${buffer.messages.length} total)`);
+
+    // Clear existing timer
+    if (buffer.timer) {
+      clearTimeout(buffer.timer);
+    }
+
+    // Set new timer
+    buffer.timer = setTimeout(async () => {
+      if (buffer.isProcessing) {
+        console.log(`⏳ Already processing messages for ${senderPhone}, skipping`);
+        return;
+      }
+
+      buffer.isProcessing = true;
+
+      try {
+        // Process all collected messages
+        const bufferedMessages = [...buffer.messages];
+        buffer.messages = [];
+        this.messageBuffers.delete(senderPhone);
+
+        console.log(`🔄 Processing ${bufferedMessages.length} buffered messages for ${senderPhone}`);
+
+        // Add special guidance for multiple messages
+        let combinedText = bufferedMessages
+          .map((m) => m.text)
+          .filter((t) => t)
+          .join('\n');
+
+        if (bufferedMessages.length > 1) {
+          const multiMessageGuidance = `
+
+**הנחיה מיוחדת: המשתמש שלח מספר הודעות!**
+- המשתמש שלח ${bufferedMessages.length} הודעות
+- עני לכל ההודעות בתגובה אחת מקיפה
+- התייחסי לכל הנקודות שהמשתמש העלה
+- שמרי על זרימה טבעית בין הנושאים
+`;
+          combinedText = multiMessageGuidance + combinedText;
+          console.log(`📝 Multi-message guidance added for ${senderPhone}`);
+        }
+
+        // Use data from the latest message for metadata
+        const latest = bufferedMessages[bufferedMessages.length - 1];
+
+        // Load system prompt for this user
+        const userWithPrompt = await this.supabase.getUserWithSystemPromptByPhone(senderPhone);
+        
+        // Check if simulation is stopped
+        if (userWithPrompt?.user?.whatsapp_status === 'stopped') {
+          console.log(`Simulation stopped for ${senderPhone}, skipping response`);
+          return;
+        }
+        
+        const systemPrompt = userWithPrompt?.systemPrompt?.prompt;
+
+        // Call AI to generate reply
+        const aiResponse = await this.aiService.generateResponse(
+          [{ role: 'user', content: combinedText } as any],
+          systemPrompt ? { systemPrompt } : undefined
+        );
+
+        const replyText = aiResponse?.content?.trim();
+        if (replyText && replyText.length > 0) {
+          await wasenderService.sendMessage(senderPhone, replyText);
+          if (userWithPrompt?.user?.id) {
+            await this.supabase.updateUserWhatsAppStatus(userWithPrompt.user.id, 'active');
+          }
+        }
+      } catch (error) {
+        console.error('❌ Error processing buffered messages:', { senderPhone, error });
+      } finally {
+        buffer.isProcessing = false;
+      }
+    }, this.DEBOUNCE_DELAY);
+  }
+
+  private getImageExtension(mimetype: string): string {
+    if (mimetype.includes('jpeg') || mimetype.includes('jpg')) return '.jpg';
+    if (mimetype.includes('png')) return '.png';
+    if (mimetype.includes('gif')) return '.gif';
+    if (mimetype.includes('webp')) return '.webp';
+    return '.jpg'; // default
+  }
 
   private normalizePhoneNumber(input: string): string {
     // Keep digits only
@@ -47,12 +185,49 @@ export class WhatsAppController {
         }
 
         // Extract text from different possible shapes
-        const text: string =
+        let text: string =
           message?.message?.conversation ||
           message?.conversation ||
           message?.text?.body ||
           message?.message?.extendedTextMessage?.text ||
           '';
+
+        // Extract metadata
+        const pushName = message?.pushName || message?.message?.pushName || '';
+        const messageTimestamp = message?.messageTimestamp || message?.timestamp || Date.now();
+
+        // Try extract audio and image if no text
+        let audioUrl: string | undefined;
+        let audioMime: string | undefined;
+        let audioMediaKey: string | undefined;
+        let imageUrl: string | undefined;
+        let imageMime: string | undefined;
+        let imageMediaKey: string | undefined;
+        
+        if (!text) {
+          const mm = (message?.message as any) || {};
+          
+          // Extract audio
+          const audio = mm.audioMessage || mm.audio || mm.ptt || mm.voice || mm.message?.audioMessage;
+          if (audio) {
+            audioUrl = audio.directPath || audio.url || audio.mediaUrl || audio.downloadUrl;
+            audioMime = audio.mimetype || audio.mimeType;
+            audioMediaKey = audio.mediaKey;
+          }
+          
+          // Extract image
+          const image = mm.imageMessage || mm.image || mm.message?.imageMessage;
+          if (image) {
+            imageUrl = image.directPath || image.url || image.mediaUrl || image.downloadUrl;
+            imageMime = image.mimetype || image.mimeType;
+            imageMediaKey = image.mediaKey;
+          }
+          
+          // Some providers put media at top-level
+          if (!audioUrl && !imageUrl && (message as any)?.mediaUrl) {
+            audioUrl = (message as any).mediaUrl;
+          }
+        }
 
         // Extract sender phone from remoteJid (e.g., "9725XXXXXXXX@s.whatsapp.net")
         const remoteJid: string = message?.key?.remoteJid || message?.from || '';
@@ -63,29 +238,71 @@ export class WhatsAppController {
           senderPhone = this.normalizePhoneNumber(senderPhone);
         }
 
-        console.log('Incoming message (parsed):', { text, senderPhone });
+        console.log('Incoming message (parsed):', { text, senderPhone, hasAudio: !!audioUrl, hasImage: !!imageUrl });
 
-        if (!text || !senderPhone || !/^972[0-9]{9}$/.test(senderPhone)) {
-          console.warn('Webhook message missing text or valid sender phone');
+        if (!senderPhone || !/^972[0-9]{9}$/.test(senderPhone)) {
+          console.warn('Webhook missing valid sender phone');
           res.status(200).json({ ok: true });
           return;
         }
 
-        // Load system prompt for this user (fallback to default inside service)
-        const userWithPrompt = await this.supabase.getUserWithSystemPromptByPhone(senderPhone);
-        const systemPrompt = userWithPrompt?.systemPrompt?.prompt;
-
-        // Call AI to generate reply
-        const aiResponse = await this.aiService.generateResponse(
-          [ { role: 'user', content: text } as any ],
-          systemPrompt ? { systemPrompt } : undefined
-        );
-
-        const replyText = aiResponse?.content?.trim();
-        if (replyText && replyText.length > 0) {
-          await wasenderService.sendMessage(senderPhone, replyText);
-          if (userWithPrompt?.user?.id) {
-            await this.supabase.updateUserWhatsAppStatus(userWithPrompt.user.id, 'active');
+        if (text) {
+          // Process text with debouncing (collects multiple messages over 5 seconds)
+          await this.processMessageWithDebounce(senderPhone, text, pushName, messageTimestamp);
+        } else if (audioUrl) {
+          // Download, convert and transcribe
+          try {
+            console.log('Processing audio:', { audioUrl, audioMediaKey, audioMime });
+            let inputPath: string;
+            
+            if (audioMediaKey) {
+              // Use decryption for encrypted files
+              inputPath = await mediaService.downloadAndDecryptAudio(audioUrl, audioMediaKey, audioMime || 'audio/ogg');
+            } else {
+              // Use direct download for unencrypted files
+              inputPath = await mediaService.downloadToTemp(audioUrl, '.ogg');
+            }
+            
+            const wavPath = await mediaService.convertToWav16kMono(inputPath);
+            const transcript = await this.aiService.transcribeWav(wavPath);
+            console.log('Transcribed text:', transcript);
+            await this.processMessageWithDebounce(senderPhone, transcript, pushName, messageTimestamp, audioUrl, undefined, audioMediaKey);
+            await mediaService.cleanupTemp(wavPath);
+          } catch (e) {
+            console.error('Audio handling failed:', e);
+            // Send fallback message
+            await this.processMessageWithDebounce(senderPhone, 'לא הצלחתי להבין את ההקלטה, אפשר לנסח בטקסט?');
+          }
+        } else if (imageUrl) {
+          // Download and analyze image
+          try {
+            console.log('Processing image:', { imageUrl, imageMediaKey, imageMime });
+            let inputPath: string;
+            
+            if (imageMediaKey) {
+              // Use decryption for encrypted files
+              inputPath = await mediaService.downloadAndDecryptImage(imageUrl, imageMediaKey, imageMime || 'image/jpeg');
+            } else {
+              // Use direct download for unencrypted files
+              const extension = this.getImageExtension(imageMime || 'image/jpeg');
+              inputPath = await mediaService.downloadToTemp(imageUrl, extension);
+            }
+            
+            // Analyze image with GPT-4 Vision
+            const { ImageAnalysisService } = await import('../services/image-analysis.service.js');
+            const imageAnalysisService = new ImageAnalysisService();
+            
+            const imageAnalysis = await imageAnalysisService.analyzeImage(inputPath);
+            const businessAnalysis = await imageAnalysisService.analyzeImageForBusiness(inputPath, 'שירותי שיווק בפייסבוק, ניהול קמפיינים, יצירת תוכן');
+            
+            const combinedAnalysis = `המשתמש שלח תמונה. ניתוח התמונה: ${imageAnalysis}\n\nהקשר עסקי: ${businessAnalysis}`;
+            console.log('Image analysis:', combinedAnalysis);
+            await this.processMessageWithDebounce(senderPhone, combinedAnalysis, pushName, messageTimestamp, undefined, imageUrl, undefined, imageMediaKey);
+            await mediaService.cleanupTemp(inputPath);
+          } catch (e) {
+            console.error('Image handling failed:', e);
+            // Send fallback message
+            await this.processMessageWithDebounce(senderPhone, 'לא הצלחתי לנתח את התמונה, אפשר לנסות שוב או לכתוב לי בטקסט?');
           }
         }
       }
@@ -100,38 +317,69 @@ export class WhatsAppController {
           return;
         }
 
-        const text: string =
+        let text: string =
           firstMsg?.message?.message?.conversation ||
           firstMsg?.message?.conversation ||
           firstMsg?.message?.text?.body ||
           firstMsg?.message?.message?.extendedTextMessage?.text ||
           '';
 
+        // Extract metadata for chats.update
+        const pushName = firstMsg?.pushName || firstMsg?.message?.pushName || '';
+        const messageTimestamp = firstMsg?.messageTimestamp || firstMsg?.timestamp || Date.now();
+
+        // Try extract audio in chats.update as well
+        let audioUrl: string | undefined;
+        let mediaKey: string | undefined;
+        if (!text) {
+          const mm = (firstMsg?.message as any) || {};
+          const audio = mm.audioMessage || mm.audio || mm.ptt || mm.voice || mm.message?.audioMessage;
+          if (audio) {
+            // Try directPath first (unencrypted), then url (encrypted)
+            audioUrl = audio.directPath || audio.url || audio.mediaUrl || audio.downloadUrl;
+            mediaKey = audio.mediaKey;
+          }
+          if (!audioUrl && (firstMsg as any)?.mediaUrl) {
+            audioUrl = (firstMsg as any).mediaUrl;
+          }
+        }
+
         const chatsId: string = chats?.id || '';
         const remoteJid: string = chatsId || firstMsg?.message?.key?.remoteJid || '';
         const digitsOnly = (remoteJid || '').replace(/\D+/g, '');
         let senderPhone = digitsOnly ? this.normalizePhoneNumber(digitsOnly) : '';
 
-        console.log('Incoming chats.update (parsed):', { text, senderPhone });
+        console.log('Incoming chats.update (parsed):', { text, senderPhone, hasAudio: !!audioUrl });
 
-        if (!text || !senderPhone || !/^972[0-9]{9}$/.test(senderPhone)) {
+        if (!senderPhone || !/^972[0-9]{9}$/.test(senderPhone)) {
           res.status(200).json({ ok: true });
           return;
         }
 
-        const userWithPrompt = await this.supabase.getUserWithSystemPromptByPhone(senderPhone);
-        const systemPrompt = userWithPrompt?.systemPrompt?.prompt;
-
-        const aiResponse = await this.aiService.generateResponse(
-          [ { role: 'user', content: text } as any ],
-          systemPrompt ? { systemPrompt } : undefined
-        );
-
-        const replyText = aiResponse?.content?.trim();
-        if (replyText && replyText.length > 0) {
-          await wasenderService.sendMessage(senderPhone, replyText);
-          if (userWithPrompt?.user?.id) {
-            await this.supabase.updateUserWhatsAppStatus(userWithPrompt.user.id, 'active');
+        if (text) {
+          await this.processMessageWithDebounce(senderPhone, text, pushName, messageTimestamp);
+        } else if (audioUrl) {
+          try {
+            console.log('Processing audio (chats.update):', { audioUrl, mediaKey });
+            let inputPath: string;
+            
+            if (mediaKey) {
+              // Use decryption for encrypted files
+              inputPath = await mediaService.downloadAndDecryptAudio(audioUrl, mediaKey, 'audio/ogg');
+            } else {
+              // Use direct download for unencrypted files
+              inputPath = await mediaService.downloadToTemp(audioUrl, '.ogg');
+            }
+            
+            const wavPath = await mediaService.convertToWav16kMono(inputPath);
+            const transcript = await this.aiService.transcribeWav(wavPath);
+            console.log('Transcribed text (chats.update):', transcript);
+            await this.processMessageWithDebounce(senderPhone, transcript, pushName, messageTimestamp, audioUrl, undefined, mediaKey);
+            await mediaService.cleanupTemp(wavPath);
+          } catch (e) {
+            console.error('Audio handling failed (chats.update):', e);
+            // Send fallback message
+            await this.processMessageWithDebounce(senderPhone, 'לא הצלחתי להבין את ההקלטה, אפשר לנסח בטקסט?');
           }
         }
       }
@@ -209,6 +457,38 @@ export class WhatsAppController {
       res.json({ success: true, message: 'First message sent successfully', wasenderResponse });
     } catch (error) {
       console.error('Error in sendFirstMessage:', error);
+      res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+  }
+
+  async stopSimulation(req: Request, res: Response): Promise<void> {
+    try {
+      const { userPhone } = req.body;
+
+      if (!userPhone) {
+        res.status(400).json({ success: false, error: 'User phone number is required' });
+        return;
+      }
+
+      // Normalize phone number
+      const normalizedPhone = this.normalizePhoneNumber(userPhone);
+      if (!/^972[0-9]{9}$/.test(normalizedPhone)) {
+        res.status(400).json({ success: false, error: 'Invalid phone number format' });
+        return;
+      }
+
+      // Update user status to 'stopped'
+      const user = await this.supabase.getUserByPhone(normalizedPhone);
+      if (!user) {
+        res.status(404).json({ success: false, error: 'User not found' });
+        return;
+      }
+
+      await this.supabase.updateUserWhatsAppStatus(user.id, 'stopped');
+
+      res.json({ success: true, message: 'Simulation stopped successfully' });
+    } catch (error) {
+      console.error('Error in stopSimulation:', error);
       res.status(500).json({ success: false, error: 'Internal server error' });
     }
   }
