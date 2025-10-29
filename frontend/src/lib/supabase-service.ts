@@ -5,6 +5,7 @@ export class SupabaseService {
   async createUser(userData: {
     phone_number: string;
     name?: string;
+    customer_gender?: string;
   }): Promise<User | null> {
     try {
       const { data, error } = await supabase
@@ -12,6 +13,7 @@ export class SupabaseService {
         .insert({
           phone_number: userData.phone_number,
           name: userData.name || null,
+          customer_gender: userData.customer_gender || null,
         })
         .select()
         .single();

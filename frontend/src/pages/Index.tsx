@@ -10,6 +10,8 @@ import optiveLogo from "@/assets/optive-logo.png";
 interface PersonalInfo {
   name: string;
   phone: string;
+  businessName: string;
+  customerGender: string;
 }
 
 interface BasicAnswers {
@@ -22,7 +24,12 @@ const STEP_NAMES = ["פרטים אישיים", "פרטי העסק", "שאלות 
 
 const Index = () => {
   const [currentStep, setCurrentStep] = useState(0);
-  const [personalInfo, setPersonalInfo] = useState<PersonalInfo>({ name: "", phone: "" });
+  const [personalInfo, setPersonalInfo] = useState<PersonalInfo>({ 
+    name: "", 
+    phone: "", 
+    businessName: "", 
+    customerGender: "" 
+  });
   const [basicAnswers, setBasicAnswers] = useState<BasicAnswers>({ 
     businessName: "", 
     businessField: "", 
@@ -121,6 +128,7 @@ const Index = () => {
               onPrevious={handlePrevious}
               basicAnswers={basicAnswers}
               userPhone={personalInfo.phone}
+              customerGender={personalInfo.customerGender}
             />
           )}
 

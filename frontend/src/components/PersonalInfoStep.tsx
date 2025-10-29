@@ -2,12 +2,13 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ChevronRight } from "lucide-react";
 import { apiService } from "@/lib/api";
 
 interface PersonalInfoStepProps {
-  onNext: (data: { name: string; phone: string; businessName: string }) => void;
-  initialData?: { name: string; phone: string; businessName: string };
+  onNext: (data: { name: string; phone: string; businessName: string; customerGender: string }) => void;
+  initialData?: { name: string; phone: string; businessName: string; customerGender: string };
 }
 
 export const PersonalInfoStep = ({ onNext, initialData }: PersonalInfoStepProps) => {
@@ -15,6 +16,7 @@ export const PersonalInfoStep = ({ onNext, initialData }: PersonalInfoStepProps)
     name: initialData?.name || "",
     phone: initialData?.phone || "",
     businessName: initialData?.businessName || "",
+    customerGender: initialData?.customerGender || "",
   });
 
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -29,8 +31,12 @@ export const PersonalInfoStep = ({ onNext, initialData }: PersonalInfoStepProps)
     
     if (!formData.phone.trim()) {
       newErrors.phone = "מספר WhatsApp הוא שדה חובה";
-    } else if (!/^972[0-9]{8,9}$/.test(formData.phone)) {
+    } else if (!/^972[0-9]{8,9}$/.test(formData.phone.trim())) {
       newErrors.phone = "פורמט WhatsApp לא תקין (דוגמה: 972509039899)";
+    }
+    
+    if (!formData.customerGender) {
+      newErrors.customerGender = "מגדר הלקוח הוא שדה חובה";
     }
     
     setErrors(newErrors);
@@ -45,7 +51,8 @@ export const PersonalInfoStep = ({ onNext, initialData }: PersonalInfoStepProps)
         // Create user in backend
         await apiService.createUser({
           phone_number: formData.phone,
-          name: formData.name
+          name: formData.name,
+          customer_gender: formData.customerGender
         });
         onNext(formData);
       } catch (error) {
@@ -91,6 +98,24 @@ export const PersonalInfoStep = ({ onNext, initialData }: PersonalInfoStepProps)
         />
         {errors.phone && <p className="text-sm text-destructive">{errors.phone}</p>}
         <p className="text-xs text-muted-foreground">📱 פורמט WhatsApp לשליחת הודעות</p>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="customerGender" className="text-foreground">מגדר הלקוח *</Label>
+        <Select
+          value={formData.customerGender}
+          onValueChange={(value) => setFormData({ ...formData, customerGender: value })}
+        >
+          <SelectTrigger className={errors.customerGender ? "border-destructive" : ""} dir="rtl">
+            <SelectValue placeholder="בחר מגדר לקוח" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="זכר">זכר</SelectItem>
+            <SelectItem value="נקבה">נקבה</SelectItem>
+          </SelectContent>
+        </Select>
+        {errors.customerGender && <p className="text-sm text-destructive">{errors.customerGender}</p>}
+        <p className="text-xs text-muted-foreground">👤 הסוכנת תדע איך לפנות ללקוח</p>
       </div>
 
       <Button type="submit" className="w-full group" variant="default" disabled={isLoading}>

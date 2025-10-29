@@ -1,6 +1,69 @@
-# מאפשר קובץ .env בסיסי, אבל חוסם גרסאות ספציפיות
-!.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+# =========================
+# Global
+# =========================
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.pid
+*.pid.lock
+*.seed
+*.tgz
+.eslintcache
+*.tsbuildinfo
+
+# Editors/IDE
+.idea/
+.vscode/
+
+# Environment files (keep examples only)
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# Node
+node_modules/
+frontend/node_modules/
+backend/node_modules/
+
+# Build outputs
+dist/
+frontend/dist/
+backend/dist/
+build/
+.next/
+.nuxt/
+.svelte-kit/
+.output/
+.vercel/
+.netlify/
+.serverless/
+.docusaurus/
+
+# Caches
+.cache/
+frontend/.vite/
+frontend/.parcel-cache/
+backend/.parcel-cache/
+.turbo/
+
+# Coverage
+coverage/
+
+# Misc
+*.orig
+*.rej
+*.swp
+*.swo
+*.tmp
+/.DS_Store
+

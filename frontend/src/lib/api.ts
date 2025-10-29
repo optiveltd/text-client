@@ -40,6 +40,7 @@ class ApiService {
   async createUser(userData: {
     phone_number: string;
     name?: string;
+    customer_gender?: string;
   }) {
     const user = await supabaseService.createUser(userData);
     if (!user) {
