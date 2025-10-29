@@ -90,15 +90,37 @@ export class ConversationService {
         }
       }
 
+      // Add customer gender information to system prompt if available
+      if (request.customerGender && systemPromptToUse) {
+        const genderInstruction = `\n\n**מידע חשוב על הלקוח:** הלקוח הוא ${request.customerGender}. פנה אליו בלשון המתאימה למגדר שלו.`;
+        systemPromptToUse += genderInstruction;
+      }
+
       const aiResponse = await this.aiService.generateResponse(
         messagesForAI,
-        systemPromptToUse ? { systemPrompt: systemPromptToUse } : undefined
+        systemPromptToUse ? { systemPrompt: systemPromptToUse } : undefined,
+        true // isForWhatsApp = true
       );
+
+      // Check if this is the first response from the agent (conversation.messages.length === 1 means only user message exists)
+      const isFirstAgentResponse = conversation.messages.length === 1;
+      
+      // If this is NOT the first agent response, remove greetings from the response
+      let cleanedContent = aiResponse.content;
+      if (!isFirstAgentResponse) {
+        // Remove common greetings and agent name mentions
+        cleanedContent = cleanedContent
+          .replace(/שלום[,\s]*/gi, '') // Remove "שלום" and "שלום,"
+          .replace(/היי[!,\s]*/gi, '') // Remove "היי!" and "היי,"
+          .replace(/אני דנה[,\s]*/gi, '') // Remove "אני דנה" and "אני דנה,"
+          .replace(/^[,\s]+/, '') // Remove leading commas and spaces
+          .trim();
+      }
 
       const assistantMessage: Message = {
         id: uuidv4(),
         role: 'assistant',
-        content: aiResponse.content,
+        content: cleanedContent,
         timestamp: new Date(),
         conversationId: conversation.id
       };

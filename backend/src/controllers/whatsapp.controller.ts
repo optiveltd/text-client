@@ -3,10 +3,15 @@ import { wasenderService } from '../services/wasender.service.js';
 import { SupabaseService } from '../services/supabase.service.js';
 import { AIService } from '../services/ai.service.js';
 import { mediaService } from '../services/media.service.js';
+import { ConversationService } from '../services/conversation.service.js';
 
 export class WhatsAppController {
   private supabase = new SupabaseService();
   private aiService = new AIService();
+  private conversationService = new ConversationService();
+  
+  // Store conversation IDs per phone number
+  private conversationIds = new Map<string, string>();
   
   // Debouncing mechanism for message collection
   private messageBuffers = new Map<string, {
@@ -24,7 +29,7 @@ export class WhatsAppController {
     lastMessageTime?: number;
   }>();
   
-  private readonly DEBOUNCE_DELAY = 5000; // 5 seconds
+  private readonly DEBOUNCE_DELAY = 10000; // 10 seconds
 
   private async processMessageWithDebounce(
     senderPhone: string, 
@@ -116,13 +121,24 @@ export class WhatsAppController {
         
         const systemPrompt = userWithPrompt?.systemPrompt?.prompt;
 
-        // Call AI to generate reply
-        const aiResponse = await this.aiService.generateResponse(
-          [{ role: 'user', content: combinedText } as any],
-          systemPrompt ? { systemPrompt } : undefined
-        );
+        // Get or create conversation ID for this phone number
+        let conversationId = this.conversationIds.get(senderPhone);
+        
+        // Call AI to generate reply using conversation service (with history)
+        const conversationResponse = await this.conversationService.sendMessage({
+          message: combinedText,
+          userPhone: senderPhone,
+          conversationId: conversationId,
+          systemPrompt: systemPrompt,
+          customerGender: userWithPrompt?.user?.customer_gender || undefined
+        });
 
-        const replyText = aiResponse?.content?.trim();
+        // Store the conversation ID for future messages
+        if (conversationResponse?.conversationId) {
+          this.conversationIds.set(senderPhone, conversationResponse.conversationId);
+        }
+
+        const replyText = conversationResponse?.message?.content?.trim();
         if (replyText && replyText.length > 0) {
           await wasenderService.sendMessage(senderPhone, replyText);
           if (userWithPrompt?.user?.id) {
@@ -427,22 +443,29 @@ export class WhatsAppController {
         return;
       }
 
-      // Build the opening message
-      let messageText = text;
-      if (!messageText) {
-        // Fetch user by phone (post-normalization) to ensure we have latest name and business_name
-        const userByPhone = await this.supabase.getUserByPhone(phoneNumber);
-        const displayName = (userByPhone?.name || userName || '').trim();
-        const businessName = (userByPhone?.business_name || userBusinessName || '').trim();
-
-        // Format: "היי {שם} אני דנה מ{שם העסק} 😊מתחילים שיחת הדמייה"
-        // If name missing, omit it gracefully; if business missing, omit the "מ{...}" part
-        const helloPart = displayName ? `היי ${displayName}` : 'היי';
-        const businessPart = businessName ? ` מ${businessName}` : '';
-        messageText = `${helloPart} אני דנה${businessPart} 😊מתחילים שיחת הדמייה`;
+      // Prevent duplicate first message
+      const existingUser = await this.supabase.getUserByPhone(phoneNumber);
+      if (existingUser && (existingUser.whatsapp_status === 'sent' || existingUser.first_message_sent_at)) {
+        res.json({ success: true, message: 'First message already sent previously' });
+        return;
       }
-      const wasenderResponse = await wasenderService.sendMessage(phoneNumber, messageText);
 
+      // Build first message from system prompt and user profile
+      const userWithPrompt = await this.supabase.getUserWithSystemPromptByPhone(phoneNumber);
+      const systemPrompt = userWithPrompt?.systemPrompt?.prompt || systemPromptText;
+      // Always get agent name (default to "נועה" if not found in system prompt)
+      const agentName = this.extractAgentName(systemPrompt);
+      const customerName = userName || userBusinessName || undefined;
+
+      // Always include "אני [שם סוכנת]" in the message
+      let firstMessage = '';
+      if (customerName) {
+        firstMessage = `היי ${customerName} אני ${agentName} מתחילים שיחת הדמייה`;
+      } else {
+        firstMessage = `היי אני ${agentName} מתחילים שיחת הדמייה`;
+      }
+
+      const wasenderResponse = await wasenderService.sendMessage(phoneNumber, firstMessage);
       if (!wasenderResponse.success) {
         res.status(502).json({ success: false, error: 'Failed to send via Wasender', details: wasenderResponse.error });
         return;
@@ -454,11 +477,31 @@ export class WhatsAppController {
         await this.supabase.updateUserWhatsAppStatus(user.id, 'sent');
       }
 
-      res.json({ success: true, message: 'First message sent successfully', wasenderResponse });
+      res.json({ success: true, message: 'First message sent successfully via AI' });
     } catch (error) {
       console.error('Error in sendFirstMessage:', error);
       res.status(500).json({ success: false, error: 'Internal server error' });
     }
+  }
+
+  private extractAgentName(systemPrompt?: string): string {
+    if (!systemPrompt) return 'נועה';
+    const lines = systemPrompt.split('\n').map(l => l.trim()).filter(Boolean);
+    const text = lines.join(' ');
+    const patterns: RegExp[] = [
+      /שמי\s+([\u0590-\u05FFA-Za-z"']{2,30})/,
+      /אני\s+([\u0590-\u05FFA-Za-z"']{2,30})/,
+      /הסוכנת\s+([\u0590-\u05FFA-Za-z"']{2,30})/,
+      /שם\s+הסוכנ[ת]\s*[:\-]?\s*([\u0590-\u05FFA-Za-z"']{2,30})/
+    ];
+    for (const re of patterns) {
+      const m = text.match(re);
+      if (m && m[1]) {
+        return m[1].replace(/["']/g, '').trim();
+      }
+    }
+    // Default to "נועה" if no agent name found in system prompt
+    return 'נועה';
   }
 
   async stopSimulation(req: Request, res: Response): Promise<void> {

@@ -14,8 +14,13 @@ validateConfig();
 
 const app = express();
 
-// Trust proxy for rate limiting
-app.set('trust proxy', true);
+// Trust proxy configuration (avoid permissive 'true')
+// In production behind a single proxy (e.g., Heroku/Render/NGINX) use 1; otherwise disable
+if (config.nodeEnv === 'production') {
+  app.set('trust proxy', 1);
+} else {
+  app.set('trust proxy', false);
+}
 
 // Security middleware
 app.use(helmet());
