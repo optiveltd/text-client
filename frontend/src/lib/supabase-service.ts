@@ -8,18 +8,21 @@ export class SupabaseService {
     customer_gender?: string;
   }): Promise<User | null> {
     try {
+      // Use upsert to update if user exists (by phone_number), or create new if not
       const { data, error } = await supabase
         .from('users')
-        .insert({
+        .upsert({
           phone_number: userData.phone_number,
           name: userData.name || null,
           customer_gender: userData.customer_gender || null,
+        }, {
+          onConflict: 'phone_number',
         })
         .select()
         .single();
 
       if (error) {
-        console.error('Error creating user:', error);
+        console.error('Error creating/updating user:', error);
         return null;
       }
 
