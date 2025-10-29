@@ -9,6 +9,9 @@ export class AIService {
   private supabaseService: SupabaseService;
 
   constructor() {
+    if (!config.openai.apiKey) {
+      throw new Error('OPENAI_API_KEY is required but not found in environment variables');
+    }
     this.openai = new OpenAI({
       apiKey: config.openai.apiKey,
     });

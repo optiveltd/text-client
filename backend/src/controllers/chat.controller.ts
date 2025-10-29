@@ -5,21 +5,77 @@ import { config } from '../config/env.js';
 import axios from 'axios';
 import FormData from 'form-data';
 import { AIService } from '../services/ai.service.js';
-// Dynamic import for pdf-parse to handle both CommonJS and ESM
+// Dynamic import for pdf-parse to handle both CommonJS and ESM and various distributions
 let pdfParse: any = null;
 const loadPdfParse = async () => {
   if (!pdfParse) {
+    // Try ESM default resolution first
     try {
       const mod: any = await import('pdf-parse');
       pdfParse = typeof mod === 'function' ? mod : (typeof mod?.default === 'function' ? mod.default : null);
-    } catch (e) {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const modCjs: any = require('pdf-parse');
-      pdfParse = typeof modCjs === 'function' ? modCjs : (typeof modCjs?.default === 'function' ? modCjs.default : null);
+    } catch {}
+
+    // Try CommonJS require root
+    if (!pdfParse) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const modCjs: any = require('pdf-parse');
+        pdfParse = typeof modCjs === 'function' ? modCjs : (typeof modCjs?.default === 'function' ? modCjs.default : null);
+      } catch {}
+    }
+
+    // Try explicit distribution paths used by newer versions
+    if (!pdfParse) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const modPathCjs: any = require('pdf-parse/dist/node/cjs/index.cjs');
+        pdfParse = typeof modPathCjs === 'function' ? modPathCjs : (typeof modPathCjs?.default === 'function' ? modPathCjs.default : null);
+      } catch {}
+    }
+
+    if (!pdfParse) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const legacyCjs: any = require('pdf-parse/dist/pdf-parse/cjs/index.cjs');
+        pdfParse = typeof legacyCjs === 'function' ? legacyCjs : (typeof legacyCjs?.default === 'function' ? legacyCjs.default : null);
+      } catch {}
+    }
+
+    // Try classic internal paths
+    if (!pdfParse) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const libPath: any = require('pdf-parse/lib/pdf-parse');
+        pdfParse = typeof libPath === 'function' ? libPath : (typeof libPath?.default === 'function' ? libPath.default : null);
+      } catch {}
+    }
+
+    if (!pdfParse) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const libIndex: any = require('pdf-parse/lib/index');
+        pdfParse = typeof libIndex === 'function' ? libIndex : (typeof libIndex?.default === 'function' ? libIndex.default : null);
+      } catch {}
+    }
+
+    // Try direct require with full path resolution
+    if (!pdfParse) {
+      try {
+        const path = require('path');
+        const pdfParsePath = require.resolve('pdf-parse');
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const direct: any = require(pdfParsePath);
+        pdfParse = typeof direct === 'function' ? direct : (typeof direct?.default === 'function' ? direct.default : null);
+        if (!pdfParse && direct && typeof direct === 'object') {
+          // Try common exports
+          pdfParse = direct.pdfParse || direct.parse || direct.default;
+        }
+      } catch {}
     }
   }
+  
   if (typeof pdfParse !== 'function') {
-    throw new Error('pdf-parse module did not export a function');
+    throw new Error('pdf-parse module did not export a function. Tried all available paths.');
   }
   return pdfParse as (buf: Buffer) => Promise<{ text: string }>;
 };
@@ -167,9 +223,9 @@ export class ChatController {
       const originalName = (uploadedFile.originalname as string) || 'document.pdf';
 
       // ========== LlamaParse (LlamaIndex Cloud) ==========
-      // Using user-provided API key and base URL directly as requested
-      const LLAMAINDEX_API_KEY = 'llx-p1rqcgG6HbG31MZU6zpip5BYpF95ckuNtliioEHWP8CZfVeG';
-      const LLAMAINDEX_BASE_URL = 'https://api.llamaindex.ai';
+      // Use environment-based configuration (config.llamaindex)
+      const LLAMAINDEX_API_KEY = config.llamaindex?.apiKey || process.env.LLAMAINDEX_API_KEY || '';
+      const LLAMAINDEX_BASE_URL = config.llamaindex?.baseUrl || process.env.LLAMAINDEX_BASE_URL || 'https://cloud.llamaindex.ai';
       if (LLAMAINDEX_API_KEY && LLAMAINDEX_BASE_URL) {
         try {
           const liForm = new FormData();
@@ -177,9 +233,13 @@ export class ChatController {
             filename: originalName,
             contentType: 'application/pdf',
           } as any);
+          // Add language hint for Hebrew
+          liForm.append('language', 'heb');
 
-          // Note: endpoint path may vary by LlamaParse API version; adjust if needed
+          // LlamaIndex Cloud API endpoint
+          // Try both possible endpoints - cloud might use different path
           const liUrl = `${LLAMAINDEX_BASE_URL}/api/parsing/upload`;
+          console.log(`[LlamaParse] Attempting upload to: ${liUrl}`);
           const liResp = await axios.post(liUrl, liForm, {
             headers: {
               ...liForm.getHeaders(),
@@ -190,8 +250,11 @@ export class ChatController {
           });
           try {
             const preview = JSON.stringify(liResp.data).slice(0, 1500);
-            console.debug(`[LlamaParse] upload response (preview): ${preview}`);
-          } catch {}
+            console.log(`[LlamaParse] upload response (preview): ${preview}`);
+            console.log(`[LlamaParse] upload status: ${liResp.status}`);
+          } catch (e) {
+            console.warn('[LlamaParse] Failed to log upload response:', e);
+          }
 
           // v2 flow: upload returns a job; poll until complete
           const jobId = (liResp.data?.id || liResp.data?.job?.id || liResp.data?.job_id || '').toString();
@@ -227,6 +290,8 @@ export class ChatController {
                   .map((v: string) => v.trim());
                 const liText = (joined[0] || '').toString().trim();
                 if (liText.length > 0) {
+                  console.log('[LlamaParse] Successfully extracted text, length:', liText.length);
+                  console.log('[LlamaParse] First 200 chars:', liText.substring(0, 200));
                   res.json({ success: true, text: liText, pages: 0 });
                   return;
                 }
@@ -250,6 +315,12 @@ export class ChatController {
           }
         } catch (e) {
           console.warn('LlamaParse failed, will try pdf-parse/OCR as fallback');
+          console.warn('LlamaParse error details:', e instanceof Error ? e.message : e);
+          if (e && typeof e === 'object' && 'response' in e) {
+            const axiosError = e as any;
+            console.warn('LlamaParse HTTP status:', axiosError.response?.status);
+            console.warn('LlamaParse HTTP data:', JSON.stringify(axiosError.response?.data).slice(0, 500));
+          }
         }
       }
 
@@ -264,6 +335,9 @@ export class ChatController {
           const hebrewMatches = text.match(/[\u0590-\u05FF]/g) || [];
           const hebrewRatio = hebrewMatches.length / Math.max(text.length, 1);
 
+          console.log('[pdf-parse] Extracted text, length:', text.length, 'Hebrew ratio:', hebrewRatio.toFixed(2));
+          console.log('[pdf-parse] First 200 chars:', text.substring(0, 200));
+
           if (hebrewRatio >= 0.2) {
             res.json({ success: true, text, pages: numpages });
             return;
@@ -273,6 +347,79 @@ export class ChatController {
         }
       } catch (pdfErr) {
         console.warn('pdf-parse failed:', pdfErr instanceof Error ? pdfErr.message : pdfErr);
+      }
+
+      // ========== UNSTRUCTURED (alternative PDF parser) ==========
+      if (process.env.UNSTRUCTURED_API_KEY && process.env.UNSTRUCTURED_API_URL) {
+        try {
+          // Dynamic import for Unstructured SDK
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const unstructuredMod: any = require('unstructured-client');
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const strategyMod: any = require('unstructured-client/sdk/models/shared');
+          
+          const UnstructuredClient = unstructuredMod.UnstructuredClient || unstructuredMod.default?.UnstructuredClient || unstructuredMod.default;
+          const Strategy = strategyMod?.Strategy || unstructuredMod.Strategy || unstructuredMod.default?.Strategy;
+          
+          if (!UnstructuredClient) {
+            throw new Error('UnstructuredClient not found in module');
+          }
+          
+          const client = new UnstructuredClient({
+            serverURL: process.env.UNSTRUCTURED_API_URL,
+            security: {
+              apiKeyAuth: process.env.UNSTRUCTURED_API_KEY,
+            },
+          });
+
+          // Use Strategy enum if available, otherwise use string
+          const strategyValue = Strategy?.HiRes || 'hi_res';
+          
+          const result = await client.general.partition({
+            partitionParameters: {
+              files: {
+                content: pdfBuffer,
+                fileName: originalName,
+              },
+              strategy: strategyValue,
+              splitPdfPage: true,
+              splitPdfAllowFailed: true,
+              splitPdfConcurrencyLevel: 15,
+              languages: ['heb'], // Hebrew language code for Unstructured
+            },
+          });
+
+          if (result.statusCode === 200 && result.elements) {
+            const unstructuredText = result.elements
+              .map((el: any) => el.text || '')
+              .filter((t: string) => t.trim().length > 0)
+              .join('\n\n');
+            
+            if (unstructuredText.trim().length > 0) {
+              console.log('[Unstructured] Successfully extracted text, length:', unstructuredText.length);
+              console.log('[Unstructured] First 200 chars:', unstructuredText.substring(0, 200));
+              
+              // Check Hebrew ratio
+              const hebrewMatches = unstructuredText.match(/[\u0590-\u05FF]/g) || [];
+              const hebrewRatio = hebrewMatches.length / Math.max(unstructuredText.length, 1);
+              console.log('[Unstructured] Hebrew ratio:', hebrewRatio.toFixed(2));
+              
+              res.json({ success: true, text: unstructuredText.trim(), pages: result.elements.length });
+              return;
+            } else {
+              console.warn('[Unstructured] No text extracted from elements');
+            }
+          } else {
+            console.warn('[Unstructured] Status code not 200 or no elements:', result.statusCode);
+          }
+        } catch (unstructuredErr) {
+          console.warn('Unstructured failed:', unstructuredErr instanceof Error ? unstructuredErr.message : unstructuredErr);
+          if (unstructuredErr && typeof unstructuredErr === 'object' && 'statusCode' in unstructuredErr) {
+            const err: any = unstructuredErr;
+            console.warn('Unstructured HTTP status:', err.statusCode);
+            console.warn('Unstructured error body:', JSON.stringify(err.body || err).slice(0, 500));
+          }
+        }
       }
 
       // ========== OCR.SPACE (scanned Hebrew PDFs) ==========
@@ -302,6 +449,20 @@ export class ChatController {
           headers: formData.getHeaders(),
           maxBodyLength: Infinity,
           timeout: 30000,
+          responseType: 'json',
+          // Ensure UTF-8 encoding
+          transformResponse: [(data) => {
+            if (typeof data === 'string') {
+              try {
+                return JSON.parse(data);
+              } catch {
+                // If already a string that looks like corrupted encoding, try to fix
+                const buffer = Buffer.from(data, 'latin1');
+                return JSON.parse(buffer.toString('utf8'));
+              }
+            }
+            return data;
+          }],
         });
 
         return response.data as any;
@@ -309,26 +470,37 @@ export class ChatController {
 
       let ocrResult: any = null;
       try {
-
-        ocrResult = await callOcr();
+        // Try with Hebrew language codes - OCR.space might use different codes
+        // Try 'heb' first (some APIs use this)
+        ocrResult = await callOcr({ language: 'heb' });
 
         if (ocrResult?.IsErroredOnProcessing && ocrResult?.ErrorMessage) {
-          const msg = Array.isArray(ocrResult.ErrorMessage)
-              ? ocrResult.ErrorMessage.join(', ')
-              : ocrResult.ErrorMessage;
-          console.warn('OCR.space error (default):', msg);
-
-          // נסה מנוע שני עם זיהוי אוטומטי
-          ocrResult = await callOcr({ OCREngine: '2', language: 'auto' });
-
+          // Try 'he' (ISO 639-1 code for Hebrew)
+          ocrResult = await callOcr({ language: 'he' });
+          
           if (ocrResult?.IsErroredOnProcessing && ocrResult?.ErrorMessage) {
-            const msg2 = Array.isArray(ocrResult.ErrorMessage)
-                ? ocrResult.ErrorMessage.join(', ')
-                : ocrResult.ErrorMessage;
-            console.warn('OCR.space error (auto):', msg2);
+            // Try without language (auto-detect) with engine 1
+            ocrResult = await callOcr();
+            
+            if (ocrResult?.IsErroredOnProcessing && ocrResult?.ErrorMessage) {
+              const msg = Array.isArray(ocrResult.ErrorMessage)
+                  ? ocrResult.ErrorMessage.join(', ')
+                  : ocrResult.ErrorMessage;
+              console.warn('OCR.space error (default):', msg);
 
-            // אחרון חביב – אנגלית בלבד (לפחות שלא יקרוס)
-            ocrResult = await callOcr({ language: 'eng' });
+              // Try engine 2 with auto-detect
+              ocrResult = await callOcr({ OCREngine: '2' });
+
+              if (ocrResult?.IsErroredOnProcessing && ocrResult?.ErrorMessage) {
+                const msg2 = Array.isArray(ocrResult.ErrorMessage)
+                    ? ocrResult.ErrorMessage.join(', ')
+                    : ocrResult.ErrorMessage;
+                console.warn('OCR.space error (engine 2):', msg2);
+
+                // Last resort – English only
+                ocrResult = await callOcr({ language: 'eng' });
+              }
+            }
           }
         }
       } catch (ocrErr) {
@@ -339,11 +511,50 @@ export class ChatController {
       let pages = 0;
 
       if (ocrResult?.ParsedResults && Array.isArray(ocrResult.ParsedResults)) {
-        fullText = ocrResult.ParsedResults.map((p: any) => p.ParsedText || '').join('\n\n');
+        fullText = ocrResult.ParsedResults.map((p: any) => {
+          let text = p.ParsedText || '';
+          // Fix encoding if text looks corrupted (contains strange characters but no Hebrew)
+          if (text && text.length > 0 && !text.match(/[\u0590-\u05FF]/) && text.match(/[^\x00-\x7F]/)) {
+            try {
+              // Try to fix latin1 -> utf8 encoding issue
+              const buffer = Buffer.from(text, 'latin1');
+              text = buffer.toString('utf8');
+              console.log('[OCR.space] Fixed encoding for text chunk');
+            } catch (e) {
+              console.warn('[OCR.space] Failed to fix encoding:', e);
+            }
+          }
+          return text;
+        }).join('\n\n');
         pages = ocrResult.ParsedResults.length;
+        console.log('[OCR.space] Extracted text, length:', fullText.length);
+        console.log('[OCR.space] First 200 chars:', fullText.substring(0, 200));
+        
+        // Check if result is mostly Hebrew - if not, might need different approach
+        const hebrewMatches = fullText.match(/[\u0590-\u05FF]/g) || [];
+        const hebrewRatio = hebrewMatches.length / Math.max(fullText.length, 1);
+        console.log('[OCR.space] Hebrew ratio:', hebrewRatio.toFixed(2));
+        
+        if (hebrewRatio < 0.1 && fullText.length > 50) {
+          console.warn('[OCR.space] Warning: Low Hebrew ratio, might be incorrect language detection');
+        }
       }
 
-      res.json({ success: true, text: (fullText || '').trim(), pages });
+      // Ensure UTF-8 encoding for Hebrew text
+      let finalText = (fullText || '').trim();
+      if (finalText) {
+        // One more encoding fix attempt if still looks corrupted
+        if (!finalText.match(/[\u0590-\u05FF]/) && finalText.match(/[^\x00-\x7F]/)) {
+          try {
+            const buffer = Buffer.from(finalText, 'latin1');
+            finalText = buffer.toString('utf8');
+            console.log('[OCR.space] Final encoding fix applied');
+          } catch {}
+        }
+        finalText = String(finalText);
+      }
+
+      res.json({ success: true, text: finalText, pages });
     } catch (error) {
       console.error('Error parsing PDF:', error);
       res.status(500).json({ success: false, error: 'Failed to parse PDF' });
